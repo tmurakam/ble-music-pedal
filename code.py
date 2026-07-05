@@ -23,123 +23,133 @@ HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
 
 
-def make_pedal():
-    p = digitalio.DigitalInOut(PEDAL_PIN)
-    p.direction = digitalio.Direction.INPUT
-    p.pull = digitalio.Pull.UP  # HIGH = open (not pressed), LOW = closed (pressed)
-    return p
+class MusicPedal:
+    def __init__(self):
+        self._pedal = self._make_pedal()
+        print("Pedal GPIO ready")
 
+        self._hid = HIDService()
+        self._device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
+        self._advertisement = ProvideServicesAdvertisement(self._hid)
+        self._advertisement.appearance = 961  # 0x03C1: Generic Keyboard
+        self._ble = BLERadio()
+        self._ble.name = "Murakami BLE Music Pedal"
+        self._keyboard = Keyboard(self._hid.devices)
 
-pedal = make_pedal()
-print("Pedal GPIO ready")
+        self._is_advertising = False
+        self._was_connected = False
+        self._prev_pedal = True   # HIGH = not pressed (pull-up)
+        self._cooldown_end = 0.0
+        self._last_activity = time.monotonic()
+        print("BLE Music Pedal ready")
 
-# ── BLE HID setup ──────────────────────────────────────────────────────────────
-hid = HIDService()
-device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
-advertisement = ProvideServicesAdvertisement(hid)
-advertisement.appearance = 961  # 0x03C1: Generic Keyboard (BLE Assigned Numbers)
-ble = BLERadio()
-ble.name = "Murakami BLE Music Pedal"
-keyboard = Keyboard(hid.devices)
+    # ── Main loop ──────────────────────────────────────────────────────────────
 
-is_advertising = False
+    def run(self):
+        self._start_advertising()
+        while True:
+            now = time.monotonic()
+            if not self._check_sleep(now):
+                self._poll_pedal(now)
+                self._update_ble()
+            time.sleep(0.005)              # 5 ms polling → <10 ms key latency (N-04)
 
+    # ── Hardware helpers ───────────────────────────────────────────────────────
 
-def start_advertising():
-    global is_advertising
-    ble.start_advertising(advertisement)
-    is_advertising = True
-    print("Advertising...")
+    def _make_pedal(self):
+        p = digitalio.DigitalInOut(PEDAL_PIN)
+        p.direction = digitalio.Direction.INPUT
+        p.pull = digitalio.Pull.UP  # HIGH = open (not pressed), LOW = closed (pressed)
+        return p
 
+    # ── BLE helpers ────────────────────────────────────────────────────────────
 
-def enter_sleep():
-    """Disconnect BLE, release GPIO, enter low-power sleep until pedal is pressed."""
-    global pedal, is_advertising
-    print("Entering sleep (idle timeout)")
-    if is_advertising:
-        ble.stop_advertising()
-        is_advertising = False
-    for conn in ble.connections:
-        conn.disconnect()
-    time.sleep(0.5)  # let BLE stack finish teardown
+    def _start_advertising(self):
+        self._ble.start_advertising(self._advertisement)
+        self._is_advertising = True
+        print("Advertising...")
 
-    pedal.deinit()  # release pin before handing it to the alarm subsystem
-    try:            # fix: always recreate pedal even if sleep setup raises
-        if SLEEP_SUPPORTED:
-            # Wake when pedal pin is pulled LOW (pedal pressed)
-            pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False, pull=True)
-            alarm.light_sleep_until_alarms(pin_alarm)
+    def _enter_sleep(self):
+        print("Entering sleep (idle timeout)")
+        if self._is_advertising:
+            self._ble.stop_advertising()
+            self._is_advertising = False
+        for conn in self._ble.connections:
+            conn.disconnect()
+        time.sleep(0.5)  # let BLE stack finish teardown
+
+        self._pedal.deinit()  # release pin before handing it to the alarm subsystem
+        try:                  # always recreate pedal even if sleep setup raises
+            if SLEEP_SUPPORTED:
+                pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False, pull=True)
+                alarm.light_sleep_until_alarms(pin_alarm)
+            else:
+                p = self._make_pedal()
+                while p.value:
+                    time.sleep(0.1)
+                p.deinit()
+        finally:
+            self._pedal = self._make_pedal()
+        print("Woke up from sleep")
+
+    def _update_ble(self):
+        connected = self._ble.connected
+        if connected and not self._was_connected:
+            print("BLE connected")
+        elif not connected and self._was_connected:
+            print("BLE disconnected")
+        self._was_connected = connected
+        if connected:
+            self._is_advertising = False   # BLE stack stops advertising on connect
+        elif not self._is_advertising:
+            self._start_advertising()      # reconnect after host drops connection
+
+    # ── Pedal logic ────────────────────────────────────────────────────────────
+
+    def _send_key(self, now):
+        try:
+            self._keyboard.press(Keycode.RIGHT_ARROW)
+            time.sleep(HID_DWELL_S)        # 20 ms dwell for reliable HID recognition
+            self._keyboard.release_all()
+            self._cooldown_end = now + COOLDOWN_S  # only set on successful send (F-03)
+            print(f"  Key sent, next after {self._cooldown_end:.1f}s")
+        except Exception as e:
+            print(f"  Send failed: {e}")   # connection dropped; no cooldown, retry OK
+
+    def _on_pedal_release(self, now):
+        print(f"Pedal released at {now:.1f}s")
+        if not self._ble.connected:
+            print("  Not connected, key skipped")
+        elif now < self._cooldown_end:
+            print(f"  Cooldown active, key skipped (ready at {self._cooldown_end:.1f}s)")
         else:
-            # Fallback: busy-wait (no alarm module available)
-            p = make_pedal()
-            while p.value:
-                time.sleep(0.1)
-            p.deinit()
-    finally:
-        pedal = make_pedal()  # always restore, even after exception
-    print("Woke up from sleep")
+            self._send_key(now)
 
-
-# ── Main loop ──────────────────────────────────────────────────────────────────
-# True = HIGH = pedal not pressed (internal pull-up)
-print("BLE Music Pedal ready")
-prev_pedal = True
-cooldown_end = 0.0
-last_activity = time.monotonic()
-was_connected = False
-start_advertising()
-
-while True:
-    now = time.monotonic()
-
-    # ── Idle timeout → sleep (F-08, F-09) ─────────────────────────────────────
-    if now - last_activity >= SLEEP_TIMEOUT_S:
-        enter_sleep()
-        # After wake, wait for pedal release; timeout guards against stuck contact
-        deadline = time.monotonic() + WAKE_RELEASE_TIMEOUT_S
-        while not pedal.value and time.monotonic() < deadline:
-            time.sleep(0.01)
-        prev_pedal = True
-        last_activity = time.monotonic()
-        start_advertising()
-        continue
-
-    raw = pedal.value
-
-    # ── Debounce + edge detection (N-06, F-01, F-02) ──────────────────────────
-    if raw != prev_pedal:
+    def _poll_pedal(self, now):
+        raw = self._pedal.value
+        if raw == self._prev_pedal:
+            return
         time.sleep(DEBOUNCE_S)
-        if pedal.value == raw:       # state is stable after debounce period
-            now = time.monotonic()   # fix: re-capture after debounce sleep
-            prev_pedal = raw
-            last_activity = now      # any pedal activity resets sleep timer
+        if self._pedal.value != raw:
+            return                         # bounced, ignore
+        now = time.monotonic()             # re-capture after debounce sleep (F-05 fix)
+        self._prev_pedal = raw
+        self._last_activity = now
+        if raw:                            # release edge: LOW → HIGH (pressed → released)
+            self._on_pedal_release(now)
 
-            if raw:                  # release edge: LOW → HIGH (pressed → released)
-                print(f"Pedal released at {now:.1f}s")
-                if not ble.connected:
-                    print("  Not connected, key skipped")
-                elif now < cooldown_end:
-                    print(f"  Cooldown active, key skipped (ready at {cooldown_end:.1f}s)")
-                else:
-                    try:             # fix: guard against BLE disconnect race
-                        keyboard.press(Keycode.RIGHT_ARROW)
-                        time.sleep(HID_DWELL_S)  # fix: 20 ms dwell for reliable HID
-                        keyboard.release_all()
-                        cooldown_end = now + COOLDOWN_S  # F-03: only on successful send
-                        print(f"  Key sent, next after {cooldown_end:.1f}s")
-                    except Exception as e:
-                        print(f"  Send failed: {e}")  # connection dropped; no cooldown
+    def _check_sleep(self, now):
+        if now - self._last_activity < SLEEP_TIMEOUT_S:
+            return False
+        self._enter_sleep()
+        deadline = time.monotonic() + WAKE_RELEASE_TIMEOUT_S
+        while not self._pedal.value and time.monotonic() < deadline:
+            time.sleep(0.01)               # wait for release; timeout guards stuck contact
+        self._prev_pedal = True
+        self._was_connected = False
+        self._last_activity = time.monotonic()
+        self._start_advertising()
+        return True
 
-    # ── BLE connection maintenance (F-05, F-06) ────────────────────────────────
-    connected = ble.connected
-    if connected and not was_connected:
-        print("BLE connected")
-    elif not connected and was_connected:
-        print("BLE disconnected")
-    was_connected = connected
-    if connected:
-        is_advertising = False       # BLE stack stops advertising on connect
-    elif not is_advertising:
-        start_advertising()          # reconnect after host drops connection
 
-    time.sleep(0.005)                # 5 ms polling → <10 ms key latency (N-04)
+MusicPedal().run()
