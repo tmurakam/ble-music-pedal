@@ -54,6 +54,7 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 
 ```python
 PEDAL_PIN = board.D0     # change to match your wiring (D0–D10 available)
+PEDAL_PRESSED = False    # False = NO (closes on press), True = NC (opens on press)
 DEBOUNCE_S = 0.05        # increase if you see chatter
 COOLDOWN_S = 10.0        # seconds between keypresses
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle → sleep

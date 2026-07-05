@@ -16,6 +16,10 @@ except ImportError:
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 PEDAL_PIN = board.D0
+# Pedal contact type (change to match your hardware):
+#   False = NO (Normally Open,  closes on press) — pin goes LOW  when pressed
+#   True  = NC (Normally Closed, opens on press) — pin goes HIGH when pressed
+PEDAL_PRESSED = False
 DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce
 COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
@@ -38,7 +42,7 @@ class MusicPedal:
 
         self._is_advertising = False
         self._was_connected = False
-        self._prev_pedal = True   # HIGH = not pressed (pull-up)
+        self._prev_pedal = not PEDAL_PRESSED  # initial state: pedal at rest
         self._cooldown_end = 0.0
         self._last_activity = time.monotonic()
         print("BLE Music Pedal ready")
@@ -81,7 +85,7 @@ class MusicPedal:
         self._pedal.deinit()  # release pin before handing it to the alarm subsystem
         try:                  # always recreate pedal even if sleep setup raises
             if SLEEP_SUPPORTED:
-                pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False, pull=True)
+                pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)
                 alarm.light_sleep_until_alarms(pin_alarm)
             else:
                 p = self._make_pedal()
@@ -135,7 +139,7 @@ class MusicPedal:
         now = time.monotonic()             # re-capture after debounce sleep (F-05 fix)
         self._prev_pedal = raw
         self._last_activity = now
-        if raw:                            # release edge: LOW → HIGH (pressed → released)
+        if raw != PEDAL_PRESSED:           # release edge: active → rest
             self._on_pedal_release(now)
 
     def _check_sleep(self, now):
@@ -143,7 +147,7 @@ class MusicPedal:
             return False
         self._enter_sleep()
         deadline = time.monotonic() + WAKE_RELEASE_TIMEOUT_S
-        while not self._pedal.value and time.monotonic() < deadline:
+        while self._pedal.value == PEDAL_PRESSED and time.monotonic() < deadline:
             time.sleep(0.01)               # wait for release; timeout guards stuck contact
         self._prev_pedal = True
         self._was_connected = False
