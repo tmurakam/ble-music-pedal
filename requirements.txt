@@ -1,0 +1,6 @@
+# Development dependencies for IDE support (type hints / autocomplete)
+# These are NOT deployed to the device — copy adafruit_ble/ and adafruit_hid/ from the
+# Adafruit CircuitPython Bundle to CIRCUITPY/lib/ instead.
+circuitpython-stubs==10.2.1
+adafruit-circuitpython-ble==10.1.3
+adafruit-circuitpython-hid==6.1.10
