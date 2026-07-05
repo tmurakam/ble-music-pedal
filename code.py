@@ -31,6 +31,7 @@ def make_pedal():
 
 
 pedal = make_pedal()
+print("Pedal GPIO ready")
 
 # ── BLE HID setup ──────────────────────────────────────────────────────────────
 hid = HIDService()
@@ -48,11 +49,13 @@ def start_advertising():
     global is_advertising
     ble.start_advertising(advertisement)
     is_advertising = True
+    print("Advertising...")
 
 
 def enter_sleep():
     """Disconnect BLE, release GPIO, enter low-power sleep until pedal is pressed."""
     global pedal, is_advertising
+    print("Entering sleep (idle timeout)")
     if is_advertising:
         ble.stop_advertising()
         is_advertising = False
@@ -74,13 +77,16 @@ def enter_sleep():
             p.deinit()
     finally:
         pedal = make_pedal()  # always restore, even after exception
+    print("Woke up from sleep")
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 # True = HIGH = pedal not pressed (internal pull-up)
+print("BLE Music Pedal ready")
 prev_pedal = True
 cooldown_end = 0.0
 last_activity = time.monotonic()
+was_connected = False
 start_advertising()
 
 while True:
@@ -109,17 +115,29 @@ while True:
             last_activity = now      # any pedal activity resets sleep timer
 
             if raw:                  # release edge: LOW → HIGH (pressed → released)
-                if now >= cooldown_end and ble.connected:
+                print(f"Pedal released at {now:.1f}s")
+                if not ble.connected:
+                    print("  Not connected, key skipped")
+                elif now < cooldown_end:
+                    print(f"  Cooldown active, key skipped (ready at {cooldown_end:.1f}s)")
+                else:
                     try:             # fix: guard against BLE disconnect race
                         keyboard.press(Keycode.RIGHT_ARROW)
                         time.sleep(HID_DWELL_S)  # fix: 20 ms dwell for reliable HID
                         keyboard.release_all()
                         cooldown_end = now + COOLDOWN_S  # F-03: only on successful send
-                    except Exception:
-                        pass         # connection dropped; no cooldown, user can retry
+                        print(f"  Key sent, next after {cooldown_end:.1f}s")
+                    except Exception as e:
+                        print(f"  Send failed: {e}")  # connection dropped; no cooldown
 
     # ── BLE connection maintenance (F-05, F-06) ────────────────────────────────
-    if ble.connected:
+    connected = ble.connected
+    if connected and not was_connected:
+        print("BLE connected")
+    elif not connected and was_connected:
+        print("BLE disconnected")
+    was_connected = connected
+    if connected:
         is_advertising = False       # BLE stack stops advertising on connect
     elif not is_advertising:
         start_advertising()          # reconnect after host drops connection
