@@ -32,11 +32,11 @@ pedal = make_pedal()
 
 # ── BLE HID setup ──────────────────────────────────────────────────────────────
 hid = HIDService()
-device_info = DeviceInfoService(software_revision="1.0", manufacturer="DIY")
+device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
 advertisement = ProvideServicesAdvertisement(hid)
 advertisement.appearance = 961  # 0x03C1: Generic Keyboard (BLE Assigned Numbers)
 ble = BLERadio()
-ble.name = "Music Pedal"
+ble.name = "Murakami BLE Music Pedal"
 keyboard = Keyboard(hid.devices)
 
 is_advertising = False
