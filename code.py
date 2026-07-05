@@ -15,7 +15,7 @@ except ImportError:
     SLEEP_SUPPORTED = False
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-PEDAL_PIN = board.GP15
+PEDAL_PIN = board.D0
 DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce
 COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep

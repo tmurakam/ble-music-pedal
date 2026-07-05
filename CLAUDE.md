@@ -8,12 +8,13 @@ BLE foot pedal keyboard device for sheet music page-turning. A foot pedal trigge
 
 ## Hardware & Software Stack
 
-- **MCU**: Raspberry Pi Pico W / Pico 2W (CYW43439 BLE chip)
+- **MCU**: Seeed Studio XIAO nRF52840 (Nordic nRF52840, BLE 5.0 native)
 - **Firmware**: CircuitPython (`code.py` — no build step)
 - **Libraries**: `adafruit_ble`, `adafruit_hid`
 - **Protocol**: BLE HID over GATT (HOG), Appearance `0x03C1` (Generic Keyboard)
 - **Keycode**: `Keycode.RIGHT_ARROW`
-- **Input**: Foot pedal on `GP15` via internal pull-up (HIGH = open/not pressed, LOW = closed/pressed)
+- **Input**: Foot pedal on `D0` via internal pull-up (HIGH = open/not pressed, LOW = closed/pressed)
+- **Power**: LiPo battery connected to BAT+ / BAT− pads; charges via USB-C (onboard charging circuit)
 
 ## Deployment
 
@@ -52,7 +53,7 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 ## Adjustable Constants
 
 ```python
-PEDAL_PIN = board.GP15   # change to match your wiring
+PEDAL_PIN = board.D0     # change to match your wiring (D0–D10 available)
 DEBOUNCE_S = 0.05        # increase if you see chatter
 COOLDOWN_S = 10.0        # seconds between keypresses
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle → sleep
