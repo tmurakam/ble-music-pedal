@@ -25,12 +25,20 @@ COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
+LED_PIN = board.LED_BLUE       # onboard RGB LED, active low
+LED_BLINK_PERIOD_S = 2.0       # blink cycle length while advertising (pairing/reconnecting)
+LED_BLINK_ON_S = 0.1           # on-time within each blink cycle
 
 
 class MusicPedal:
     def __init__(self):
         self._pedal = self._make_pedal()
         print("Pedal GPIO ready")
+
+        self._led = digitalio.DigitalInOut(LED_PIN)
+        self._led.direction = digitalio.Direction.OUTPUT
+        self._led.value = True  # active low: True = off
+        self._led_on = False
 
         self._hid = HIDService()
         self._device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
@@ -56,6 +64,7 @@ class MusicPedal:
             if not self._check_sleep(now):
                 self._poll_pedal(now)
                 self._update_ble()
+                self._update_led(now)
             time.sleep(0.005)              # 5 ms polling → <10 ms key latency (N-04)
 
     # ── Hardware helpers ───────────────────────────────────────────────────────
@@ -73,8 +82,20 @@ class MusicPedal:
         self._is_advertising = True
         print("Advertising...")
 
+    def _update_led(self, now):
+        should_light = (
+            self._is_advertising
+            and not self._ble.connected
+            and (now % LED_BLINK_PERIOD_S) < LED_BLINK_ON_S
+        )
+        if should_light != self._led_on:
+            self._led_on = should_light
+            self._led.value = not should_light  # active low
+
     def _enter_sleep(self):
         print("Entering sleep (idle timeout)")
+        self._led_on = False
+        self._led.value = True  # off during sleep
         if self._is_advertising:
             self._ble.stop_advertising()
             self._is_advertising = False
