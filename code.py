@@ -19,7 +19,7 @@ PEDAL_PIN = board.D0
 # Pedal contact type (change to match your hardware):
 #   False = NO (Normally Open,  closes on press) — pin goes LOW  when pressed
 #   True  = NC (Normally Closed, opens on press) — pin goes HIGH when pressed
-PEDAL_PRESSED = False
+PEDAL_PRESSED = True
 DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce
 COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
