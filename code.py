@@ -1,5 +1,6 @@
 import board
 import digitalio
+import keypad
 import time
 from adafruit_ble import BLERadio
 from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
@@ -20,7 +21,12 @@ PEDAL_PIN = board.D0
 #   False = NO (Normally Open,  closes on press) — pin goes LOW  when pressed
 #   True  = NC (Normally Closed, opens on press) — pin goes HIGH when pressed
 PEDAL_PRESSED = True
-DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce
+DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce (handled by keypad.Keys)
+KEYPAD_SCAN_INTERVAL_S = DEBOUNCE_S / 2  # keypad background scan interval
+KEYPAD_DEBOUNCE_THRESHOLD = 2            # confirm after 2 matching scans (= DEBOUNCE_S)
+MAIN_LOOP_INTERVAL_MS = 20   # main loop poll interval; debounce/edge detection now
+                             # runs in the background via keypad, so this only needs
+                             # to be fast enough for BLE/LED housekeeping
 COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
@@ -51,7 +57,6 @@ class MusicPedal:
 
         self._is_advertising = False
         self._was_connected = False
-        self._prev_pedal = not PEDAL_PRESSED  # initial state: pedal at rest
         self._cooldown_end = 0.0
         self._last_activity = time.monotonic()
         print("BLE Music Pedal ready")
@@ -66,15 +71,29 @@ class MusicPedal:
                 self._poll_pedal(now)
                 self._update_ble()
                 self._update_led(now)
-            time.sleep(0.005)              # 5 ms polling → <10 ms key latency (N-04)
+            time.sleep(MAIN_LOOP_INTERVAL_MS / 1000)
 
     # ── Hardware helpers ───────────────────────────────────────────────────────
 
     def _make_pedal(self):
+        # keypad.Keys debounces and edge-detects in the background (C implementation),
+        # emitting press/release events instead of requiring manual polling + debounce.
+        return keypad.Keys(
+            (PEDAL_PIN,),
+            value_when_pressed=PEDAL_PRESSED,
+            pull=True,
+            interval=KEYPAD_SCAN_INTERVAL_S,
+            debounce_threshold=KEYPAD_DEBOUNCE_THRESHOLD,
+            max_events=4,
+        )
+
+    def _pedal_currently_pressed(self):
         p = digitalio.DigitalInOut(PEDAL_PIN)
         p.direction = digitalio.Direction.INPUT
-        p.pull = digitalio.Pull.UP  # HIGH = open (not pressed), LOW = closed (pressed)
-        return p
+        p.pull = digitalio.Pull.UP
+        pressed = p.value == PEDAL_PRESSED
+        p.deinit()
+        return pressed
 
     # ── BLE helpers ────────────────────────────────────────────────────────────
 
@@ -112,10 +131,8 @@ class MusicPedal:
                 pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)
                 alarm.light_sleep_until_alarms(pin_alarm)
             else:
-                p = self._make_pedal()
-                while p.value:
+                while not self._pedal_currently_pressed():
                     time.sleep(0.1)
-                p.deinit()
         finally:
             self._pedal = self._make_pedal()
         print("Woke up from sleep")
@@ -154,26 +171,22 @@ class MusicPedal:
             self._send_key(now)
 
     def _poll_pedal(self, now):
-        raw = self._pedal.value
-        if raw == self._prev_pedal:
-            return
-        time.sleep(DEBOUNCE_S)
-        if self._pedal.value != raw:
-            return                         # bounced, ignore
-        now = time.monotonic()             # re-capture after debounce sleep (F-05 fix)
-        self._prev_pedal = raw
-        self._last_activity = now
-        if raw != PEDAL_PRESSED:           # release edge: active → rest
-            self._on_pedal_release(now)
+        while True:
+            event = self._pedal.events.get()
+            if event is None:
+                return
+            now = time.monotonic()         # re-capture in case of queued events
+            self._last_activity = now
+            if event.released:             # release edge: active → rest
+                self._on_pedal_release(now)
 
     def _check_sleep(self, now):
         if now - self._last_activity < SLEEP_TIMEOUT_S:
             return False
         self._enter_sleep()
         deadline = time.monotonic() + WAKE_RELEASE_TIMEOUT_S
-        while self._pedal.value == PEDAL_PRESSED and time.monotonic() < deadline:
+        while self._pedal_currently_pressed() and time.monotonic() < deadline:
             time.sleep(0.01)               # wait for release; timeout guards stuck contact
-        self._prev_pedal = True
         self._was_connected = False
         self._last_activity = time.monotonic()
         self._start_advertising()

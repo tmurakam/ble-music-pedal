@@ -10,7 +10,7 @@ BLE foot pedal keyboard device for sheet music page-turning. A foot pedal trigge
 
 - **MCU**: Seeed Studio XIAO nRF52840 (Nordic nRF52840, BLE 5.0 native)
 - **Firmware**: CircuitPython (`code.py` — no build step)
-- **Libraries**: `adafruit_ble`, `adafruit_hid`
+- **Libraries**: `adafruit_ble`, `adafruit_hid`; pedal debouncing uses the built-in `keypad` module (no extra library needed)
 - **Protocol**: BLE HID over GATT (HOG), Appearance `0x03C1` (Generic Keyboard)
 - **Keycode**: `Keycode.RIGHT_ARROW`
 - **Input**: Foot pedal on `D0` via internal pull-up (HIGH = open/not pressed, LOW = closed/pressed)
@@ -30,11 +30,11 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 
 | Requirement | Implementation |
 |---|---|
-| Trigger on **release edge** only | `raw == True` after `prev_pedal == False` |
+| Trigger on **release edge** only | `keypad.Keys` event with `event.released == True` |
 | **10-second cooldown** after each send | `cooldown_end = now + COOLDOWN_S`; ignored during cooldown, no queuing |
 | **10-minute idle sleep** | `SLEEP_TIMEOUT_S = 600`; disconnect BLE, enter `alarm.light_sleep_until_alarms()` |
 | Wake on pedal press | `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False)` |
-| **50 ms debounce** | Confirm stable state after `DEBOUNCE_S` delay |
+| **50 ms debounce** | Handled natively by `keypad.Keys` background scanning (`KEYPAD_SCAN_INTERVAL_S` × `KEYPAD_DEBOUNCE_THRESHOLD` ≈ `DEBOUNCE_S`); the main loop only reads already-debounced press/release events |
 | Auto-reconnect (bonding) | Handled by `adafruit_ble` BLE stack automatically |
 | **LED blink: pairing vs connected** | Onboard blue LED (`board.LED_BLUE`, active low) flashes on for `LED_BLINK_ON_S`; every `LED_BLINK_PERIOD_PAIRING_S` (0.5s, 2×/s) while advertising and not connected, every `LED_BLINK_PERIOD_CONNECTED_S` (3s) while connected; off when asleep |
 
@@ -42,21 +42,24 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 
 `code.py` is a single-file event loop:
 
-1. **Setup**: create `DigitalInOut` for pedal, init `HIDService` + `BLERadio`, start advertising
+1. **Setup**: create `keypad.Keys` for the pedal pin, init `HIDService` + `BLERadio`, start advertising
 2. **Loop**:
    - Check idle timeout → `enter_sleep()` → `alarm.light_sleep_until_alarms()` → restart advertising on wake
-   - Read `pedal.value`, debounce on state change
+   - Drain pending `pedal.events` (already debounced/edge-detected by `keypad`)
    - On release edge: send `RIGHT_ARROW` if connected and not in cooldown
    - Maintain BLE advertising whenever disconnected
 
-`enter_sleep()` must `deinit()` the `DigitalInOut` before handing the pin to `alarm.pin.PinAlarm`. The pin object is recreated after wake. If the `alarm` module is unavailable (unsupported CircuitPython build), the code falls back to a busy-wait loop.
+`enter_sleep()` must `deinit()` the `keypad.Keys` object before handing the pin to `alarm.pin.PinAlarm`. The object is recreated after wake. If the `alarm` module is unavailable (unsupported CircuitPython build), the code falls back to a busy-wait loop that reads the raw pin via a temporary `DigitalInOut` (`_pedal_currently_pressed()`), which is also used to wait out a stuck/held pedal after waking.
 
 ## Adjustable Constants
 
 ```python
 PEDAL_PIN = board.D0     # change to match your wiring (D0–D10 available)
 PEDAL_PRESSED = False    # False = NO (closes on press), True = NC (opens on press)
-DEBOUNCE_S = 0.05        # increase if you see chatter
+DEBOUNCE_S = 0.05        # total debounce time; increase if you see chatter
+KEYPAD_SCAN_INTERVAL_S = DEBOUNCE_S / 2   # keypad.Keys background scan interval
+KEYPAD_DEBOUNCE_THRESHOLD = 2             # matching scans required ≈ DEBOUNCE_S
+MAIN_LOOP_INTERVAL_MS = 20   # main loop tick; only gates BLE/LED housekeeping now
 COOLDOWN_S = 10.0        # seconds between keypresses
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle → sleep
 LED_PIN = board.LED_BLUE # onboard RGB LED used for advertising indicator
