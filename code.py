@@ -1,3 +1,4 @@
+import analogio
 import board
 import digitalio
 import keypad
@@ -31,6 +32,7 @@ COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
+BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample + print battery voltage
 LED_PIN = board.LED_BLUE       # onboard RGB LED, active low
 LED_BLINK_PERIOD_PAIRING_S = 0.5    # advertising/pairing: 2 blinks per second
 LED_BLINK_PERIOD_CONNECTED_S = 3.0  # connected: 1 blink per 3 seconds
@@ -59,6 +61,7 @@ class MusicPedal:
         self._was_connected = False
         self._cooldown_end = 0.0
         self._last_activity = time.monotonic()
+        self._next_battery_log = 0.0
         print("BLE Music Pedal ready")
 
     # ── Main loop ──────────────────────────────────────────────────────────────
@@ -71,6 +74,7 @@ class MusicPedal:
                 self._poll_pedal(now)
                 self._update_ble()
                 self._update_led(now)
+                self._log_battery(now)
             time.sleep(MAIN_LOOP_INTERVAL_MS / 1000)
 
     # ── Hardware helpers ───────────────────────────────────────────────────────
@@ -94,6 +98,25 @@ class MusicPedal:
         pressed = p.value == PEDAL_PRESSED
         p.deinit()
         return pressed
+
+    def _read_battery_voltage(self):
+        # Onboard divider (~1/3) is only enabled while READ_BATT_ENABLE is driven
+        # low, to avoid its ~2.3uA leakage current the rest of the time.
+        enable = digitalio.DigitalInOut(board.READ_BATT_ENABLE)
+        enable.direction = digitalio.Direction.OUTPUT
+        enable.value = False
+        vbat = analogio.AnalogIn(board.VBATT)
+        adc_v = (vbat.value / 65535) * vbat.reference_voltage
+        vbat.deinit()
+        enable.value = True
+        enable.deinit()
+        return adc_v * 3
+
+    def _log_battery(self, now):
+        if now < self._next_battery_log:
+            return
+        self._next_battery_log = now + BATTERY_LOG_INTERVAL_S
+        print(f"Battery: {self._read_battery_voltage():.2f} V")
 
     # ── BLE helpers ────────────────────────────────────────────────────────────
 
