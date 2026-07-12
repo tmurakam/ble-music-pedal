@@ -26,8 +26,9 @@ SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
 LED_PIN = board.LED_BLUE       # onboard RGB LED, active low
-LED_BLINK_PERIOD_S = 2.0       # blink cycle length while advertising (pairing/reconnecting)
-LED_BLINK_ON_S = 0.1           # on-time within each blink cycle
+LED_BLINK_PERIOD_PAIRING_S = 0.5    # advertising/pairing: 2 blinks per second
+LED_BLINK_PERIOD_CONNECTED_S = 3.0  # connected: 1 blink per 3 seconds
+LED_BLINK_ON_S = 0.1                # on-time within each blink cycle
 
 
 class MusicPedal:
@@ -83,11 +84,13 @@ class MusicPedal:
         print("Advertising...")
 
     def _update_led(self, now):
-        should_light = (
-            self._is_advertising
-            and not self._ble.connected
-            and (now % LED_BLINK_PERIOD_S) < LED_BLINK_ON_S
-        )
+        if self._ble.connected:
+            period = LED_BLINK_PERIOD_CONNECTED_S
+        elif self._is_advertising:
+            period = LED_BLINK_PERIOD_PAIRING_S
+        else:
+            period = None
+        should_light = period is not None and (now % period) < LED_BLINK_ON_S
         if should_light != self._led_on:
             self._led_on = should_light
             self._led.value = not should_light  # active low

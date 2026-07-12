@@ -36,7 +36,7 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 | Wake on pedal press | `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False)` |
 | **50 ms debounce** | Confirm stable state after `DEBOUNCE_S` delay |
 | Auto-reconnect (bonding) | Handled by `adafruit_ble` BLE stack automatically |
-| **LED blink while advertising** | Onboard blue LED (`board.LED_BLUE`, active low) flashes on for `LED_BLINK_ON_S` every `LED_BLINK_PERIOD_S` while advertising and not connected; off when connected or asleep |
+| **LED blink: pairing vs connected** | Onboard blue LED (`board.LED_BLUE`, active low) flashes on for `LED_BLINK_ON_S`; every `LED_BLINK_PERIOD_PAIRING_S` (0.5s, 2×/s) while advertising and not connected, every `LED_BLINK_PERIOD_CONNECTED_S` (3s) while connected; off when asleep |
 
 ## Architecture
 
@@ -60,6 +60,7 @@ DEBOUNCE_S = 0.05        # increase if you see chatter
 COOLDOWN_S = 10.0        # seconds between keypresses
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle → sleep
 LED_PIN = board.LED_BLUE # onboard RGB LED used for advertising indicator
-LED_BLINK_PERIOD_S = 2.0    # blink cycle length while advertising
+LED_BLINK_PERIOD_PAIRING_S = 0.5    # blink cycle while advertising/pairing (2x/s)
+LED_BLINK_PERIOD_CONNECTED_S = 3.0  # blink cycle while connected (1x/3s)
 LED_BLINK_ON_S = 0.1        # on-time within each blink cycle
 ```
