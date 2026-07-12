@@ -49,6 +49,10 @@ class MusicPedal:
         self._led.value = True  # active low: True = off
         self._led_on = False
 
+        self._charge_rate = digitalio.DigitalInOut(board.CHARGE_RATE)
+        self._charge_rate.direction = digitalio.Direction.OUTPUT
+        self._charge_rate.value = False  # LOW = 100 mA charge current (default is 50 mA)
+
         self._hid = HIDService()
         self._device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
         self._advertisement = ProvideServicesAdvertisement(self._hid)
