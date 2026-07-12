@@ -18,10 +18,23 @@ except ImportError:
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 PEDAL_PIN = board.D0
-# Pedal contact type (change to match your hardware):
+# Pedal contact type — describes the wiring, GND-referenced in both cases:
 #   False = NO (Normally Open,  closes on press) — pin goes LOW  when pressed
 #   True  = NC (Normally Closed, opens on press) — pin goes HIGH when pressed
+# NOTE: this is only a complete NO/NC switch for _pedal_currently_pressed(), which
+# always forces an internal pull-up itself and just compares against this value. The
+# keypad.Keys() pull (via KEYPAD_VALUE_WHEN_PRESSED below) and the PinAlarm pull in
+# _enter_sleep() are both currently hardcoded for the NC case and would need to be
+# reworked to also support flipping this to False.
 PEDAL_PRESSED = True
+# keypad.Keys ties its internal pull direction to value_when_pressed (pull-up is only
+# available when value_when_pressed=False). Our pedal is NC wired to GND: it drives
+# LOW at rest and floats when pressed, so it needs a pull-up while pressed. This is
+# NOT a generic "not PEDAL_PRESSED" formula — a GND-referenced NO pedal also needs a
+# pull-up (it floats at rest instead), so this would need to become unconditionally
+# False, with the NO/NC distinction moved into _pedal_released() instead, before
+# PEDAL_PRESSED = False would work here again.
+KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED
 DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce (handled by keypad.Keys)
 KEYPAD_SCAN_INTERVAL_S = DEBOUNCE_S / 2  # keypad background scan interval
 KEYPAD_DEBOUNCE_THRESHOLD = 2            # confirm after 2 matching scans (= DEBOUNCE_S)
@@ -86,14 +99,22 @@ class MusicPedal:
     def _make_pedal(self):
         # keypad.Keys debounces and edge-detects in the background (C implementation),
         # emitting press/release events instead of requiring manual polling + debounce.
+        # See KEYPAD_VALUE_WHEN_PRESSED above for why this isn't PEDAL_PRESSED, and
+        # _pedal_released() below for how the resulting inverted event names are
+        # translated back to physical meaning.
         return keypad.Keys(
             (PEDAL_PIN,),
-            value_when_pressed=PEDAL_PRESSED,
+            value_when_pressed=KEYPAD_VALUE_WHEN_PRESSED,
             pull=True,
             interval=KEYPAD_SCAN_INTERVAL_S,
             debounce_threshold=KEYPAD_DEBOUNCE_THRESHOLD,
             max_events=4,
         )
+
+    def _pedal_released(self, event):
+        # keypad runs with inverted polarity (see _make_pedal above), so its own
+        # event.pressed corresponds to the physical release edge.
+        return event.pressed
 
     def _pedal_currently_pressed(self):
         p = digitalio.DigitalInOut(PEDAL_PIN)
@@ -155,6 +176,9 @@ class MusicPedal:
         self._pedal.deinit()  # release pin before handing it to the alarm subsystem
         try:                  # always recreate pedal even if sleep setup raises
             if SLEEP_SUPPORTED:
+                # Same value-tied-pull convention as keypad.Keys (see
+                # KEYPAD_VALUE_WHEN_PRESSED above) — untested whether this correctly
+                # gets a pull-up for our NC pedal, or has the same latent bug.
                 pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)
                 alarm.light_sleep_until_alarms(pin_alarm)
             else:
@@ -204,7 +228,7 @@ class MusicPedal:
                 return
             now = time.monotonic()         # re-capture in case of queued events
             self._last_activity = now
-            if event.released:             # release edge: active → rest
+            if self._pedal_released(event):
                 self._on_pedal_release(now)
 
     def _check_sleep(self, now):
