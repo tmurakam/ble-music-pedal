@@ -1,3 +1,4 @@
+import _bleio
 import analogio
 import board
 import digitalio
@@ -47,6 +48,14 @@ SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
 BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update battery level
+# Unpair gesture: the device has no display/buttons to expose a bonding-management UI,
+# so a rapid-tap gesture on the pedal itself triggers it instead. A long-press gesture
+# was considered and rejected — a held pedal is normal operation (e.g. resting a foot on
+# it), so it wouldn't reliably distinguish intent from accident. N releases within the
+# window are counted regardless of BLE connection/cooldown state, since a stuck/mismatched
+# bond is exactly the situation this needs to work in.
+UNPAIR_TAP_COUNT = 10     # number of rapid pedal releases required to trigger unpair
+UNPAIR_WINDOW_S = 5.0     # time window within which the taps must occur
 # Single-cell LiPo open-circuit voltage -> charge percent, approximated as a piecewise-
 # linear curve (the discharge curve is far from linear, especially in the 3.7-3.9V
 # midrange). Points below are commonly used rule-of-thumb values, not this cell's
@@ -110,6 +119,7 @@ class MusicPedal:
         self._cooldown_end = 0.0
         self._last_activity = time.monotonic()
         self._next_battery_log = 0.0
+        self._unpair_tap_times = []
         print("BLE Music Pedal ready")
 
     # ── Main loop ──────────────────────────────────────────────────────────────
@@ -229,6 +239,43 @@ class MusicPedal:
             self._pedal = self._make_pedal()
         print("Woke up from sleep")
 
+    def _track_unpair_gesture(self, now):
+        self._unpair_tap_times = [
+            t for t in self._unpair_tap_times if now - t < UNPAIR_WINDOW_S
+        ]
+        self._unpair_tap_times.append(now)
+        if len(self._unpair_tap_times) < UNPAIR_TAP_COUNT:
+            return False
+        self._unpair_tap_times = []
+        self._erase_bonding()
+        return True
+
+    def _erase_bonding(self):
+        print("Unpair gesture detected: erasing all BLE bonds")
+        if self._is_advertising:
+            self._ble.stop_advertising()
+            self._is_advertising = False
+        for conn in self._ble.connections:
+            conn.disconnect()
+        time.sleep(0.5)  # let BLE stack finish teardown before touching bond storage
+        try:
+            _bleio.adapter.erase_bonding()
+            print("  Bonds erased")
+        except Exception as e:
+            print(f"  Erase bonding failed: {e}")
+        finally:
+            self._blink_unpair_confirmation()
+            self._was_connected = False
+            self._start_advertising()
+
+    def _blink_unpair_confirmation(self):
+        for _ in range(6):
+            self._led.value = False  # active low: on
+            time.sleep(0.08)
+            self._led.value = True   # off
+            time.sleep(0.08)
+        self._led_on = False
+
     def _update_ble(self):
         connected = self._ble.connected
         if connected and not self._was_connected:
@@ -270,6 +317,8 @@ class MusicPedal:
             now = time.monotonic()         # re-capture in case of queued events
             self._last_activity = now
             if self._pedal_released(event):
+                if self._track_unpair_gesture(now):
+                    continue                # unpair triggered; skip normal key-send
                 self._on_pedal_release(now)
 
     def _check_sleep(self, now):

@@ -36,9 +36,10 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 | Wake on pedal press | `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False)` |
 | **50 ms debounce** | Handled natively by `keypad.Keys` background scanning (`KEYPAD_SCAN_INTERVAL_S` × `KEYPAD_DEBOUNCE_THRESHOLD` ≈ `DEBOUNCE_S`); the main loop only reads already-debounced press/release events |
 | NC pedal needs a pull-up while pressed, but `keypad.Keys(pull=True)` only selects a pull-up when `value_when_pressed=False` | `code.py` passes `KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED` to `keypad.Keys` instead of `PEDAL_PRESSED` directly, then reads `_pedal_released()` (which checks `event.pressed`, not `event.released`) to translate keypad's resulting inverted event names back to physical meaning — see caveat below |
-| Auto-reconnect (bonding) | Handled by `adafruit_ble` BLE stack automatically |
+| Auto-reconnect (bonding) | Handled by `adafruit_ble` BLE stack automatically; manual unpair via pedal gesture below |
 | **LED blink: pairing vs connected** | Onboard blue LED (`board.LED_BLUE`, active low) flashes on for `LED_BLINK_ON_S`; every `LED_BLINK_PERIOD_PAIRING_S` (0.5s, 2×/s) while advertising and not connected, every `LED_BLINK_PERIOD_CONNECTED_S` (3s) while connected; off when asleep |
 | **Battery level reported to host** | Standard BLE Battery Service (`0x180F`); every `BATTERY_LOG_INTERVAL_S` (5s) `_log_battery()` samples `VBATT`, converts volts→percent via the piecewise-linear `BATTERY_CURVE` (a rule-of-thumb LiPo approximation, not this cell's datasheet), and writes it to `BatteryService.level`. Not included in the advertisement payload — iOS discovers it via GATT once connected. Charging status is *not* reported (see caveat below) |
+| **Unpair gesture** | `UNPAIR_TAP_COUNT` (10) pedal releases within `UNPAIR_WINDOW_S` (5s) → `_bleio.adapter.erase_bonding()`, disconnect, 6× fast LED blink confirmation, then re-advertise. The device has no display/buttons, so this rapid-tap gesture is the only on-device way to clear stale/mismatched bonds (e.g. after the host "forgets" the device). A long-press gesture was considered and rejected — a held pedal is normal operation, so it can't reliably signal intent. Counted independent of BLE connection state and cooldown, since a broken bond is exactly the situation this must work in |
 
 ## Architecture
 
@@ -81,6 +82,8 @@ LED_BLINK_PERIOD_CONNECTED_S = 3.0  # blink cycle while connected (1x/3s)
 LED_BLINK_ON_S = 0.1        # on-time within each blink cycle
 BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update BLE battery level
 BATTERY_CURVE = (...)         # piecewise-linear LiPo voltage(V) -> percent lookup table
+UNPAIR_TAP_COUNT = 10    # pedal releases required to trigger unpair
+UNPAIR_WINDOW_S = 5.0    # window (seconds) those releases must fall within
 ```
 
 ### Caveat: `PEDAL_PRESSED` is not a clean NO/NC toggle
