@@ -44,7 +44,8 @@ MAIN_LOOP_INTERVAL_MS = 20   # main loop poll interval; debounce/edge detection 
                              # runs in the background via keypad, so this only needs
                              # to be fast enough for BLE/LED housekeeping
 COOLDOWN_S = 10.0        # seconds before next keypress is allowed
-SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
+SLEEP_TIMEOUT_MIN = 30.0     # minutes idle before BLE disconnect + sleep
+SLEEP_TIMEOUT_S = SLEEP_TIMEOUT_MIN * 60
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
 BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update battery level
