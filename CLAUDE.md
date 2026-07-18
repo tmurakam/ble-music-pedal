@@ -1,112 +1,92 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+このファイルは、このリポジトリでコードを扱う際に Claude Code (claude.ai/code) が参照するガイドである。
 
-## Project Overview
+## プロジェクト概要
 
-BLE foot pedal keyboard device for sheet music page-turning. A foot pedal triggers a BLE HID right-arrow keypress sent to an iPad, allowing hands-free page navigation during performance.
+譜めくり用のBLEフットペダル型キーボードデバイス。フットペダルの操作でBLE HIDの右矢印キー押下をiPadに送信し、演奏中に手を使わずページ送りできるようにする。
 
-## Hardware & Software Stack
+## ハードウェア・ソフトウェア構成
 
-- **MCU**: Seeed Studio XIAO nRF52840 (Nordic nRF52840, BLE 5.0 native)
-- **Firmware**: CircuitPython (`code.py` — no build step)
-- **Libraries**: `adafruit_ble`, `adafruit_hid`; pedal debouncing uses the built-in `keypad` module (no extra library needed)
-- **Protocol**: BLE HID over GATT (HOG), Appearance `0x03C1` (Generic Keyboard)
-- **Keycode**: `Keycode.RIGHT_ARROW`
-- **Input**: Foot pedal on `D0` via internal pull-up (HIGH = open/not pressed, LOW = closed/pressed)
-- **Power**: LiPo battery connected to BAT+ / BAT− pads; charges via USB-C (onboard charging circuit)
+- **MCU**: Seeed Studio XIAO nRF52840(Nordic nRF52840、BLE 5.0内蔵)
+- **ファームウェア**: CircuitPython(`code.py` — ビルド不要)
+- **ライブラリ**: `adafruit_ble`、`adafruit_hid`。ペダルのデバウンスは組み込みの`keypad`モジュールを使用(追加ライブラリ不要)
+- **プロトコル**: BLE HID over GATT(HOG)、Appearance `0x03C1`(Generic Keyboard)
+- **キーコード**: `Keycode.RIGHT_ARROW`
+- **入力**: `D0`ピンのフットペダル、内部プルアップ使用(HIGH = 開放/未押下、LOW = 導通/押下)
+- **電源**: BAT+ / BAT−パッドに接続したLiPoバッテリー。USB-C経由で充電(基板上の充電回路)
 
-## Deployment
+## デプロイ
 
-Copy `code.py` and required libraries to the CIRCUITPY USB drive. There is no build or compile step — CircuitPython reloads automatically on file save.
+`code.py` と必要なライブラリをCIRCUITPY USBドライブにコピーする。ビルドやコンパイルの工程はなく、ファイル保存時にCircuitPythonが自動的にリロードする。
 
-Required libraries (place under `CIRCUITPY/lib/`), available from the Adafruit CircuitPython Bundle:
+必要なライブラリ(`CIRCUITPY/lib/` 配下に配置。Adafruit CircuitPython Bundleから入手可能):
 - `adafruit_ble/`
 - `adafruit_hid/`
 
-Serial REPL: `screen /dev/tty.usbmodem* 115200`
+シリアルREPL: `screen /dev/tty.usbmodem* 115200`
 
-## Key Behavioral Requirements
+## 主要な挙動要件
 
-| Requirement | Implementation |
+| 要件 | 実装 |
 |---|---|
-| Trigger on **release edge** only | `keypad.Keys` event with `event.released == True` |
-| **10-second cooldown** after each send | `cooldown_end = now + COOLDOWN_S`; ignored during cooldown, no queuing |
-| **10-minute idle sleep** | `SLEEP_TIMEOUT_S = 600`; disconnect BLE, enter `alarm.light_sleep_until_alarms()` |
-| Wake on pedal press | `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False)` |
-| **50 ms debounce** | Handled natively by `keypad.Keys` background scanning (`KEYPAD_SCAN_INTERVAL_S` × `KEYPAD_DEBOUNCE_THRESHOLD` ≈ `DEBOUNCE_S`); the main loop only reads already-debounced press/release events |
-| NC pedal needs a pull-up while pressed, but `keypad.Keys(pull=True)` only selects a pull-up when `value_when_pressed=False` | `code.py` passes `KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED` to `keypad.Keys` instead of `PEDAL_PRESSED` directly, then reads `_pedal_released()` (which checks `event.pressed`, not `event.released`) to translate keypad's resulting inverted event names back to physical meaning — see caveat below |
-| Auto-reconnect (bonding) | Handled by `adafruit_ble` BLE stack automatically; manual unpair via pedal gesture below |
-| **LED blink: pairing vs connected** | Onboard blue LED (`board.LED_BLUE`, active low) flashes on for `LED_BLINK_ON_S`; every `LED_BLINK_PERIOD_PAIRING_S` (0.5s, 2×/s) while advertising and not connected, every `LED_BLINK_PERIOD_CONNECTED_S` (3s) while connected; off when asleep |
-| **Battery level reported to host** | Standard BLE Battery Service (`0x180F`); every `BATTERY_LOG_INTERVAL_S` (5s) `_log_battery()` samples `VBATT`, converts volts→percent via the piecewise-linear `BATTERY_CURVE` (a rule-of-thumb LiPo approximation, not this cell's datasheet), and writes it to `BatteryService.level`. Not included in the advertisement payload — iOS discovers it via GATT once connected. Charging status is *not* reported (see caveat below) |
-| **Unpair gesture** | `UNPAIR_TAP_COUNT` (10) pedal releases within `UNPAIR_WINDOW_S` (5s) → `_bleio.adapter.erase_bonding()`, disconnect, 6× fast LED blink confirmation, then re-advertise. The device has no display/buttons, so this rapid-tap gesture is the only on-device way to clear stale/mismatched bonds (e.g. after the host "forgets" the device). A long-press gesture was considered and rejected — a held pedal is normal operation, so it can't reliably signal intent. Counted independent of BLE connection state and cooldown, since a broken bond is exactly the situation this must work in |
+| **リリースエッジ**でのみトリガー | `keypad.Keys`イベントの`event.released == True` |
+| 送信ごとに**10秒間のクールダウン** | `cooldown_end = now + COOLDOWN_S`。クールダウン中は無視し、キューイングもしない |
+| **10分間無操作でスリープ** | `SLEEP_TIMEOUT_S = 600`。BLEを切断し`alarm.light_sleep_until_alarms()`に入る |
+| ペダル押下でウェイク | `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False)` |
+| **50msデバウンス** | `keypad.Keys`のバックグラウンドスキャンが標準で処理(`KEYPAD_SCAN_INTERVAL_S` × `KEYPAD_DEBOUNCE_THRESHOLD` ≈ `DEBOUNCE_S`)。メインループはデバウンス済みのpress/releaseイベントを読むだけ |
+| NCペダルは押下中にプルアップが必要だが、`keypad.Keys(pull=True)`は`value_when_pressed=False`の時しかプルアップを選択しない | `code.py`は`PEDAL_PRESSED`をそのまま渡す代わりに`KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED`を`keypad.Keys`に渡し、`_pedal_released()`(`event.released`ではなく`event.pressed`を見る)でkeypad側の反転したイベント名を物理的な意味に変換して読む — 詳細は下記の注意点を参照 |
+| 自動再接続(ボンディング) | `adafruit_ble`のBLEスタックが自動処理。手動でのペアリング解除は下記のペダルジェスチャーを参照 |
+| **LED点滅: ペアリング中 vs 接続中** | オンボードの青色LED(`board.LED_BLUE`、Low-active)が`LED_BLINK_ON_S`だけ点灯。アドバタイズ中かつ未接続時は`LED_BLINK_PERIOD_PAIRING_S`ごと(0.5秒、2回/秒)、接続中は`LED_BLINK_PERIOD_CONNECTED_S`ごと(3秒に1回)。スリープ中は消灯 |
+| **バッテリー残量をホストへ報告** | 標準BLE Battery Service(`0x180F`)を使用。`BATTERY_LOG_INTERVAL_S`(5秒)ごとに`_log_battery()`が`VBATT`をサンプリングし、区分線形の`BATTERY_CURVE`(このセルのデータシート値ではなく一般的な目安のLiPo近似)で電圧→残量%に変換して`BatteryService.level`に書き込む。アドバタイズのペイロードには含まれない(すでにname + appearance + HIDサービスで手一杯) — iOS側は接続後にGATT経由で検出する。充電状態は報告し*ない*(下記の注意点を参照) |
+| **ペアリング解除ジェスチャー** | `UNPAIR_WINDOW_S`(5秒)以内に`UNPAIR_TAP_COUNT`(10回)ペダルをリリースすると`_bleio.adapter.erase_bonding()`を呼び、切断・LED高速点滅6回での確認・再アドバタイズを行う。本デバイスにはディスプレイもボタンもないため、古い/不整合なボンディング情報(ホスト側で「登録解除」した後など)をデバイス側からクリアする唯一の手段がこの連打ジェスチャーである。長押しジェスチャーも検討したが却下した — ペダルを踏みっぱなしにするのは通常操作でもあり得るため、意図の識別に使えない。BLE接続状態やクールダウンとは無関係にカウントする。ボンディングが壊れている状況こそこの機能が動く必要がある場面だからである |
 
-## Architecture
+## アーキテクチャ
 
-`code.py` is a single-file event loop:
+`code.py`は単一ファイルのイベントループである:
 
-1. **Setup**: create `keypad.Keys` for the pedal pin, init `HIDService` + `BLERadio`, start advertising
-2. **Loop**:
-   - Check idle timeout → `enter_sleep()` → `alarm.light_sleep_until_alarms()` → restart advertising on wake
-   - Drain pending `pedal.events` (already debounced/edge-detected by `keypad`)
-   - On release edge: send `RIGHT_ARROW` if connected and not in cooldown
-   - Maintain BLE advertising whenever disconnected
+1. **セットアップ**: ペダルピン用の`keypad.Keys`を作成し、`HIDService` + `BLERadio`を初期化してアドバタイズを開始
+2. **ループ**:
+   - アイドルタイムアウトを確認 → `enter_sleep()` → `alarm.light_sleep_until_alarms()` → ウェイク後にアドバタイズ再開
+   - 保留中の`pedal.events`を消化(`keypad`によりデバウンス・エッジ検出済み)
+   - リリースエッジで: 接続中かつクールダウン外なら`RIGHT_ARROW`を送信
+   - 未接続時は常にBLEアドバタイズを維持
 
-`enter_sleep()` must `deinit()` the `keypad.Keys` object before handing the pin to `alarm.pin.PinAlarm`. The object is recreated after wake. If the `alarm` module is unavailable (unsupported CircuitPython build), the code falls back to a busy-wait loop that reads the raw pin via a temporary `DigitalInOut` (`_pedal_currently_pressed()`), which is also used to wait out a stuck/held pedal after waking.
+`enter_sleep()`は、ピンを`alarm.pin.PinAlarm`に渡す前に`keypad.Keys`オブジェクトを`deinit()`する必要がある。このオブジェクトはウェイク後に再生成される。`alarm`モジュールが利用できない場合(CircuitPythonのビルドが非対応)は、一時的な`DigitalInOut`で生のピンを読むビジーウェイトループ(`_pedal_currently_pressed()`)にフォールバックする。このメソッドは、ウェイク後にペダルが押しっぱなし・スタックしている状態を待つのにも使われる。
 
-### Caveat: `READ_BATT_ENABLE` must stay LOW, never HIGH
+### 注意点: `READ_BATT_ENABLE`は常にLOWを維持し、HIGHにしてはならない
 
-Seeed's own docs warn that driving `board.READ_BATT_ENABLE` (P0.14) HIGH disables the
-divider's read path and can expose `board.VBATT` (P0.31, 3.6V max input) to voltages
-above its limit — risking pin damage — especially while charging. An earlier version of
-this code drove it HIGH between reads to save its ~2.3uA divider leakage; `code.py` now
-sets it up once in `__init__` (`self._batt_enable`) and never touches it again, accepting
-the small constant leakage (negligible next to the rest of the system's draw) in exchange
-for never hitting the unsafe state.
+Seeed自身のドキュメントで、`board.READ_BATT_ENABLE`(P0.14)をHIGHにすると分圧回路の読み取りパスが無効化され、`board.VBATT`(P0.31、最大入力3.6V)にその上限を超える電圧がかかりうる(特に充電中)、ピン破損のリスクがある、と警告されている。以前のバージョンのコードでは、分圧回路の約2.3uAのリーク電流を節約するために読み取りの合間にHIGHへ切り替えていたが、`code.py`は現在`__init__`内で一度だけセットアップし(`self._batt_enable`)、以降は一切触れない。この安全でない状態に決して陥らないことと引き換えに、わずかな定常リーク(システム全体の消費電力に比べれば無視できる)を受け入れている。
 
-## Adjustable Constants
+## 調整可能な定数
 
 ```python
-PEDAL_PIN = board.D0     # change to match your wiring (D0–D10 available)
-PEDAL_PRESSED = True     # False = NO (closes on press), True = NC (opens on press) — see caveat below
-KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED  # value_when_pressed passed to keypad.Keys — see caveat below
-DEBOUNCE_S = 0.05        # total debounce time; increase if you see chatter
-KEYPAD_SCAN_INTERVAL_S = DEBOUNCE_S / 2   # keypad.Keys background scan interval
-KEYPAD_DEBOUNCE_THRESHOLD = 2             # matching scans required ≈ DEBOUNCE_S
-MAIN_LOOP_INTERVAL_MS = 20   # main loop tick; only gates BLE/LED housekeeping now
-COOLDOWN_S = 10.0        # seconds between keypresses
-SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle → sleep
-LED_PIN = board.LED_BLUE # onboard RGB LED used for advertising indicator
-LED_BLINK_PERIOD_PAIRING_S = 0.5    # blink cycle while advertising/pairing (2x/s)
-LED_BLINK_PERIOD_CONNECTED_S = 3.0  # blink cycle while connected (1x/3s)
-LED_BLINK_ON_S = 0.1        # on-time within each blink cycle
-BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update BLE battery level
-BATTERY_CURVE = (...)         # piecewise-linear LiPo voltage(V) -> percent lookup table
-UNPAIR_TAP_COUNT = 10    # pedal releases required to trigger unpair
-UNPAIR_WINDOW_S = 5.0    # window (seconds) those releases must fall within
+PEDAL_PIN = board.D0     # 配線に合わせて変更(D0–D10が使用可能)
+PEDAL_PRESSED = True     # False = NO(押下で導通)、True = NC(押下で開放) — 下記の注意点を参照
+KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED  # keypad.Keysに渡すvalue_when_pressed — 下記の注意点を参照
+DEBOUNCE_S = 0.05        # デバウンス時間の合計。チャタリングが出る場合は増やす
+KEYPAD_SCAN_INTERVAL_S = DEBOUNCE_S / 2   # keypad.Keysのバックグラウンドスキャン間隔
+KEYPAD_DEBOUNCE_THRESHOLD = 2             # 確定に必要な一致スキャン回数 ≈ DEBOUNCE_S
+MAIN_LOOP_INTERVAL_MS = 20   # メインループの周期。現在はBLE/LEDのハウスキーピングのみをゲートする
+COOLDOWN_S = 10.0        # キー送信の間隔(秒)
+SLEEP_TIMEOUT_S = 600.0  # 10分間無操作でスリープ
+LED_PIN = board.LED_BLUE # アドバタイズ状態表示に使うオンボードRGB LED
+LED_BLINK_PERIOD_PAIRING_S = 0.5    # アドバタイズ/ペアリング中の点滅周期(2回/秒)
+LED_BLINK_PERIOD_CONNECTED_S = 3.0  # 接続中の点滅周期(3秒に1回)
+LED_BLINK_ON_S = 0.1        # 各点滅周期内の点灯時間
+BATTERY_LOG_INTERVAL_S = 5.0  # 電圧サンプリング + BLEバッテリー残量更新の頻度
+BATTERY_CURVE = (...)         # 区分線形のLiPo 電圧(V) -> 残量% ルックアップテーブル
+UNPAIR_TAP_COUNT = 10    # ペアリング解除に必要なペダルリリース回数
+UNPAIR_WINDOW_S = 5.0    # そのリリースが収まるべき時間幅(秒)
 ```
 
-### Caveat: `PEDAL_PRESSED` is not a clean NO/NC toggle
+### 注意点: `PEDAL_PRESSED`は単純なNO/NC切り替えスイッチではない
 
-`PEDAL_PRESSED` is fully NO/NC-agnostic only in `_pedal_currently_pressed()` (the raw
-`digitalio` fallback poll), which always forces an internal pull-up itself and simply
-compares against `PEDAL_PRESSED`.
+`PEDAL_PRESSED`が完全にNO/NCに依存しない形で扱われているのは`_pedal_currently_pressed()`(生の`digitalio`によるフォールバックポーリング)だけであり、これは常に自前で内部プルアップを有効化し、単純に`PEDAL_PRESSED`と比較している。
 
-The other two consumers assume the current NC-to-GND wiring and are **not** safe to use
-with `PEDAL_PRESSED = False` (a GND-referenced NO pedal) as-is:
+他の2箇所は現状のNC-GND配線を前提としており、`PEDAL_PRESSED = False`(GND基準のNOペダル)にそのまま変更すると**安全に動作しない**:
 
-- `keypad.Keys` ties its internal pull direction to `value_when_pressed`: a pull-up is
-  only selected when `value_when_pressed=False`. Our NC pedal drives LOW at rest and
-  floats (needing a pull-up) when pressed, so `code.py` passes the inverted
-  `KEYPAD_VALUE_WHEN_PRESSED` to get that pull-up, and reads `event.pressed` in
-  `_pedal_released()` as the physical release edge. This is not a generic
-  `not PEDAL_PRESSED` formula — a GND-referenced NO pedal also needs a pull-up (it
-  floats at rest instead of when pressed), so `KEYPAD_VALUE_WHEN_PRESSED` would need to
-  become unconditionally `False`, with the NO/NC distinction moved into
-  `_pedal_released()`, before `PEDAL_PRESSED = False` would work correctly here.
-- `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)` in `_enter_sleep()`
-  likely has the same value-tied-pull convention as `keypad.Keys` and has not been
-  verified to correctly select a pull-up for the NC case, let alone NO.
+- `keypad.Keys`は内部のプル方向を`value_when_pressed`に紐付けており、プルアップが選択されるのは`value_when_pressed=False`のときだけである。うちのNCペダルは静止時にLOWを出力し、押下時にフロート(プルアップが必要)になるため、`code.py`は反転させた`KEYPAD_VALUE_WHEN_PRESSED`を渡してプルアップを得ており、`_pedal_released()`では`event.pressed`を物理的なリリースエッジとして読んでいる。これは単純な`not PEDAL_PRESSED`という一般式ではない — GND基準のNOペダルもプルアップが必要である(NCペダルとは逆に、押下時ではなく静止時にフロートする)ため、`PEDAL_PRESSED = False`を正しく動作させるには、`KEYPAD_VALUE_WHEN_PRESSED`を無条件に`False`にした上で、NO/NCの区別を`_pedal_released()`側に移す必要がある。
+- `_enter_sleep()`内の`alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)`もおそらく`keypad.Keys`と同じ「値とプル方向が紐付いた」仕様を持つと思われるが、NCケースで正しくプルアップを選択できているかは未検証であり、NOケースはなおさら未検証である。
 
-In short: switching to a NO pedal today requires reworking both of these, not just
-flipping `PEDAL_PRESSED`.
+つまり、NOペダルへの切り替えは`PEDAL_PRESSED`を反転させるだけでは済まず、現状ではこの2箇所の作り直しが必要になる。
