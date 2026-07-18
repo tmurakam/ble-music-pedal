@@ -5,6 +5,7 @@ import keypad
 import time
 from adafruit_ble import BLERadio
 from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+from adafruit_ble.services.standard import BatteryService
 from adafruit_ble.services.standard.hid import HIDService
 from adafruit_ble.services.standard.device_info import DeviceInfoService
 from adafruit_hid.keyboard import Keyboard
@@ -45,7 +46,25 @@ COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_S = 600.0  # 10 minutes idle before BLE disconnect + sleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
-BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample + print battery voltage
+BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update battery level
+# Single-cell LiPo open-circuit voltage -> charge percent, approximated as a piecewise-
+# linear curve (the discharge curve is far from linear, especially in the 3.7-3.9V
+# midrange). Points below are commonly used rule-of-thumb values, not this cell's
+# datasheet — good enough for a coarse "roughly how much is left" indicator.
+BATTERY_CURVE = (
+    (3.30, 0),
+    (3.60, 5),
+    (3.65, 10),
+    (3.70, 15),
+    (3.75, 25),
+    (3.80, 40),
+    (3.85, 55),
+    (3.90, 70),
+    (3.95, 80),
+    (4.00, 90),
+    (4.10, 95),
+    (4.20, 100),
+)
 LED_PIN = board.LED_BLUE       # onboard RGB LED, active low
 LED_BLINK_PERIOD_PAIRING_S = 0.5    # advertising/pairing: 2 blinks per second
 LED_BLINK_PERIOD_CONNECTED_S = 3.0  # connected: 1 blink per 3 seconds
@@ -68,6 +87,10 @@ class MusicPedal:
 
         self._hid = HIDService()
         self._device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
+        self._battery = BatteryService()
+        self._battery.level = self._voltage_to_percent(self._read_battery_voltage())
+        # Not included in the advertisement payload (already tight with name +
+        # appearance + HID service); iOS discovers it via GATT once connected.
         self._advertisement = ProvideServicesAdvertisement(self._hid)
         self._advertisement.appearance = 961  # 0x03C1: Generic Keyboard
         self._ble = BLERadio()
@@ -137,11 +160,26 @@ class MusicPedal:
         enable.deinit()
         return adc_v * 3
 
+    def _voltage_to_percent(self, voltage):
+        curve = BATTERY_CURVE
+        if voltage <= curve[0][0]:
+            return curve[0][1]
+        if voltage >= curve[-1][0]:
+            return curve[-1][1]
+        for (v_lo, p_lo), (v_hi, p_hi) in zip(curve, curve[1:]):
+            if voltage <= v_hi:
+                frac = (voltage - v_lo) / (v_hi - v_lo)
+                return round(p_lo + frac * (p_hi - p_lo))
+        return curve[-1][1]  # unreachable given the bounds checks above
+
     def _log_battery(self, now):
         if now < self._next_battery_log:
             return
         self._next_battery_log = now + BATTERY_LOG_INTERVAL_S
-        print(f"Battery: {self._read_battery_voltage():.2f} V")
+        voltage = self._read_battery_voltage()
+        percent = self._voltage_to_percent(voltage)
+        self._battery.level = percent
+        print(f"Battery: {voltage:.2f} V ({percent}%)")
 
     # ── BLE helpers ────────────────────────────────────────────────────────────
 
