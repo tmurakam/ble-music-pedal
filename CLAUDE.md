@@ -33,7 +33,7 @@
 | **リリースエッジ**でのみトリガー | `keypad.Keys`イベントの`event.released == True` |
 | 送信ごとに**10秒間のクールダウン** | `cooldown_end = now + COOLDOWN_S`。クールダウン中は無視し、キューイングもしない |
 | **30分間無操作でスリープ** | `SLEEP_TIMEOUT_MIN = 30`(`SLEEP_TIMEOUT_S`はこれを60倍して算出)。BLEを切断し`alarm.light_sleep_until_alarms()`に入る |
-| ペダル押下でウェイク | `alarm.pin.PinAlarm(pin=PEDAL_PIN, value=False)` |
+| ペダル押下でウェイク | `alarm.pin.PinAlarm`は使わず、`alarm.time.TimeAlarm`で`SLEEP_POLL_INTERVAL_S`(0.5秒)ごとに短くライトスリープ→起床のたびに`_pedal_currently_pressed()`でポーリングする方式。理由は下記の注意点を参照 |
 | **50msデバウンス** | `keypad.Keys`のバックグラウンドスキャンが標準で処理(`KEYPAD_SCAN_INTERVAL_S` × `KEYPAD_DEBOUNCE_THRESHOLD` ≈ `DEBOUNCE_S`)。メインループはデバウンス済みのpress/releaseイベントを読むだけ |
 | NCペダルは押下中にプルアップが必要だが、`keypad.Keys(pull=True)`は`value_when_pressed=False`の時しかプルアップを選択しない | `code.py`は`PEDAL_PRESSED`をそのまま渡す代わりに`KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED`を`keypad.Keys`に渡し、`_pedal_released()`(`event.released`ではなく`event.pressed`を見る)でkeypad側の反転したイベント名を物理的な意味に変換して読む — 詳細は下記の注意点を参照 |
 | 自動再接続(ボンディング) | `adafruit_ble`のBLEスタックが自動処理。手動でのペアリング解除は下記のペダルジェスチャーを参照 |
@@ -52,7 +52,7 @@
    - リリースエッジで: 接続中かつクールダウン外なら`RIGHT_ARROW`を送信
    - 未接続時は常にBLEアドバタイズを維持
 
-`enter_sleep()`は、ピンを`alarm.pin.PinAlarm`に渡す前に`keypad.Keys`オブジェクトを`deinit()`する必要がある。このオブジェクトはウェイク後に再生成される。`alarm`モジュールが利用できない場合(CircuitPythonのビルドが非対応)は、一時的な`DigitalInOut`で生のピンを読むビジーウェイトループ(`_pedal_currently_pressed()`)にフォールバックする。このメソッドは、ウェイク後にペダルが押しっぱなし・スタックしている状態を待つのにも使われる。
+`_enter_sleep()`は、生の`digitalio`で直接ピンを読む`_pedal_currently_pressed()`に渡す前に`keypad.Keys`オブジェクトを`deinit()`する必要がある(ピンの排他制御のため)。このオブジェクトはウェイク後、`_pedal_currently_pressed()`によるポーリングが完全に終わってから再生成される — 途中で再生成すると、以後の`_pedal_currently_pressed()`呼び出しがピンの二重使用で`ValueError`になる。`SLEEP_SUPPORTED`(=`alarm`モジュールが利用可能)なら`alarm.time.TimeAlarm`で`SLEEP_POLL_INTERVAL_S`ごとに短くライトスリープしながらポーリングし、利用できない場合は`time.sleep(SLEEP_POLL_INTERVAL_S)`のビジーウェイトにフォールバックする。同じポーリングループが、ウェイク後にペダルが押しっぱなし・スタックしている状態を待つのにも使われる(`WAKE_RELEASE_TIMEOUT_S`でタイムアウト)。
 
 ### 注意点: `READ_BATT_ENABLE`は常にLOWを維持し、HIGHにしてはならない
 
@@ -71,6 +71,7 @@ MAIN_LOOP_INTERVAL_MS = 20   # メインループの周期。現在はBLE/LEDの
 COOLDOWN_S = 10.0        # キー送信の間隔(秒)
 SLEEP_TIMEOUT_MIN = 30.0     # 無操作でスリープに入るまでの時間(分)
 SLEEP_TIMEOUT_S = SLEEP_TIMEOUT_MIN * 60  # 上記を秒に換算した値(直接編集しない)
+SLEEP_POLL_INTERVAL_S = 0.5  # スリープ中、ペダル押下を確認する間隔(秒)。短いほど復帰が速いが消費電力は増える
 LED_PIN = board.LED_BLUE # アドバタイズ状態表示に使うオンボードRGB LED
 LED_BLINK_PERIOD_PAIRING_S = 0.5    # アドバタイズ/ペアリング中の点滅周期(2回/秒)
 LED_BLINK_PERIOD_CONNECTED_S = 3.0  # 接続中の点滅周期(3秒に1回)
@@ -83,11 +84,10 @@ UNPAIR_WINDOW_S = 5.0    # そのリリースが収まるべき時間幅(秒)
 
 ### 注意点: `PEDAL_PRESSED`は単純なNO/NC切り替えスイッチではない
 
-`PEDAL_PRESSED`が完全にNO/NCに依存しない形で扱われているのは`_pedal_currently_pressed()`(生の`digitalio`によるフォールバックポーリング)だけであり、これは常に自前で内部プルアップを有効化し、単純に`PEDAL_PRESSED`と比較している。
+`PEDAL_PRESSED`が完全にNO/NCに依存しない形で扱われているのは`_pedal_currently_pressed()`(生の`digitalio`による読み取り)だけであり、これは常に自前で内部プルアップを有効化し、単純に`PEDAL_PRESSED`と比較している。スリープ中のポーリング(`_enter_sleep()`)もこのメソッドを使っているため、NO/NCの区別を意識せず安全に動作する。
 
-他の2箇所は現状のNC-GND配線を前提としており、`PEDAL_PRESSED = False`(GND基準のNOペダル)にそのまま変更すると**安全に動作しない**:
+`keypad.Keys`(通常運転中のイベント検出)だけは現状のNC-GND配線を前提としており、`PEDAL_PRESSED = False`(GND基準のNOペダル)にそのまま変更すると**安全に動作しない**: 内部のプル方向を`value_when_pressed`に紐付けており、プルアップが選択されるのは`value_when_pressed=False`のときだけである。うちのNCペダルは静止時にLOWを出力し、押下時にフロート(プルアップが必要)になるため、`code.py`は反転させた`KEYPAD_VALUE_WHEN_PRESSED`を渡してプルアップを得ており、`_pedal_released()`では`event.pressed`を物理的なリリースエッジとして読んでいる。これは単純な`not PEDAL_PRESSED`という一般式ではない — GND基準のNOペダルもプルアップが必要である(NCペダルとは逆に、押下時ではなく静止時にフロートする)ため、`PEDAL_PRESSED = False`を正しく動作させるには、`KEYPAD_VALUE_WHEN_PRESSED`を無条件に`False`にした上で、NO/NCの区別を`_pedal_released()`側に移す必要がある。
 
-- `keypad.Keys`は内部のプル方向を`value_when_pressed`に紐付けており、プルアップが選択されるのは`value_when_pressed=False`のときだけである。うちのNCペダルは静止時にLOWを出力し、押下時にフロート(プルアップが必要)になるため、`code.py`は反転させた`KEYPAD_VALUE_WHEN_PRESSED`を渡してプルアップを得ており、`_pedal_released()`では`event.pressed`を物理的なリリースエッジとして読んでいる。これは単純な`not PEDAL_PRESSED`という一般式ではない — GND基準のNOペダルもプルアップが必要である(NCペダルとは逆に、押下時ではなく静止時にフロートする)ため、`PEDAL_PRESSED = False`を正しく動作させるには、`KEYPAD_VALUE_WHEN_PRESSED`を無条件に`False`にした上で、NO/NCの区別を`_pedal_released()`側に移す必要がある。
-- `_enter_sleep()`内の`alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)`もおそらく`keypad.Keys`と同じ「値とプル方向が紐付いた」仕様を持つと思われるが、NCケースで正しくプルアップを選択できているかは未検証であり、NOケースはなおさら未検証である。
+つまり、NOペダルへの切り替えは`PEDAL_PRESSED`を反転させるだけでは済まず、現状では`keypad.Keys`まわりの作り直しが必要になる(スリープ側はそのままで問題ない)。
 
-つまり、NOペダルへの切り替えは`PEDAL_PRESSED`を反転させるだけでは済まず、現状ではこの2箇所の作り直しが必要になる。
+なお、当初はスリープ復帰にも`alarm.pin.PinAlarm`を使う案を検討したが、採用しなかった。nRF52840のPinAlarmはレベルトリガーのみ対応(`edge=True`は`ValueError`)で、かつ`pull`は`value`と逆方向にしか選べない(`value=False`→プルアップ、`value=True`→プルダウン)。うちのNCペダルは静止時LOW駆動・押下時フロートという配線のため、レベルトリガーが即座に発火しない値(`value=True`)を選ぶと必要なプルアップではなくプルダウンになってしまい、フロート中のピンがLOW側に引かれて絶対にHIGHを検出できない — 外部プルアップ抵抗を追加しない限り、この配線ではPinAlarmで正しく起床させる組み合わせが存在しない。そのため`alarm.time.TimeAlarm`による定期ポーリング方式(`_pedal_currently_pressed()`を再利用)を採用している。

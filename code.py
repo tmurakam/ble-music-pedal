@@ -17,6 +17,7 @@ try:
     SLEEP_SUPPORTED = True
 except ImportError:
     SLEEP_SUPPORTED = False
+    print("alarm module not available; falling back to busy-wait sleep/wake")
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 PEDAL_PIN = board.D0
@@ -46,6 +47,7 @@ MAIN_LOOP_INTERVAL_MS = 20   # main loop poll interval; debounce/edge detection 
 COOLDOWN_S = 10.0        # seconds before next keypress is allowed
 SLEEP_TIMEOUT_MIN = 30.0     # minutes idle before BLE disconnect + sleep
 SLEEP_TIMEOUT_S = SLEEP_TIMEOUT_MIN * 60
+SLEEP_POLL_INTERVAL_S = 0.5  # how often to wake briefly and poll the pedal while asleep
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
 BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update battery level
@@ -225,17 +227,35 @@ class MusicPedal:
             conn.disconnect()
         time.sleep(0.5)  # let BLE stack finish teardown
 
-        self._pedal.deinit()  # release pin before handing it to the alarm subsystem
+        self._pedal.deinit()  # release pin so the poll loop below can claim it exclusively
         try:                  # always recreate pedal even if sleep setup raises
-            if SLEEP_SUPPORTED:
-                # Same value-tied-pull convention as keypad.Keys (see
-                # KEYPAD_VALUE_WHEN_PRESSED above) — untested whether this correctly
-                # gets a pull-up for our NC pedal, or has the same latent bug.
-                pin_alarm = alarm.pin.PinAlarm(pin=PEDAL_PIN, value=PEDAL_PRESSED, pull=True)
-                alarm.light_sleep_until_alarms(pin_alarm)
-            else:
-                while not self._pedal_currently_pressed():
-                    time.sleep(0.1)
+            # alarm.pin.PinAlarm can't be used to wake on press here. On the nRF52840
+            # it only supports level triggering (edge=True raises ValueError), and a
+            # level alarm fires immediately if the pin already matches `value` when
+            # sleep begins. Our NC pedal drives LOW at rest, so `value` must be True
+            # (HIGH) to differ from the resting level and avoid firing instantly — but
+            # PinAlarm's pull is hardwired opposite to `value` (pull=True + value=True
+            # -> pull-down), so requesting value=True gets a pull-down instead of the
+            # pull-up the pedal needs while floating on press. The floating pin then
+            # gets held near LOW and the alarm never sees a press. No value/pull
+            # combination escapes this for this wiring without an external pull-up
+            # resistor, so instead we periodically light-sleep on a timer and poll the
+            # pin ourselves via _pedal_currently_pressed(), which always forces its own
+            # correct internal pull-up regardless of polarity.
+            while not self._pedal_currently_pressed():
+                if SLEEP_SUPPORTED:
+                    time_alarm = alarm.time.TimeAlarm(
+                        monotonic_time=time.monotonic() + SLEEP_POLL_INTERVAL_S
+                    )
+                    alarm.light_sleep_until_alarms(time_alarm)
+                else:
+                    time.sleep(SLEEP_POLL_INTERVAL_S)
+            # Wait for release here too, still while the pin is free of self._pedal's
+            # claim — _make_pedal() below would otherwise conflict with the raw
+            # digitalio access _pedal_currently_pressed() uses.
+            deadline = time.monotonic() + WAKE_RELEASE_TIMEOUT_S
+            while self._pedal_currently_pressed() and time.monotonic() < deadline:
+                time.sleep(0.01)       # timeout guards a stuck/held contact
         finally:
             self._pedal = self._make_pedal()
         print("Woke up from sleep")
@@ -326,9 +346,6 @@ class MusicPedal:
         if now - self._last_activity < SLEEP_TIMEOUT_S:
             return False
         self._enter_sleep()
-        deadline = time.monotonic() + WAKE_RELEASE_TIMEOUT_S
-        while self._pedal_currently_pressed() and time.monotonic() < deadline:
-            time.sleep(0.01)               # wait for release; timeout guards stuck contact
         self._was_connected = False
         self._last_activity = time.monotonic()
         self._start_advertising()
