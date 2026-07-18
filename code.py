@@ -85,6 +85,14 @@ class MusicPedal:
         self._charge_rate.direction = digitalio.Direction.OUTPUT
         self._charge_rate.value = False  # LOW = 100 mA charge current (default is 50 mA)
 
+        # Kept permanently LOW (never deinit'd) — Seeed's own guidance is to never drive
+        # this HIGH, since doing so disables the read path and can expose VBATT (P0.31,
+        # 3.6V max) to voltages above its limit, risking pin damage. The ~2.3uA divider
+        # leakage this costs is negligible next to the rest of the system's draw.
+        self._batt_enable = digitalio.DigitalInOut(board.READ_BATT_ENABLE)
+        self._batt_enable.direction = digitalio.Direction.OUTPUT
+        self._batt_enable.value = False
+
         self._hid = HIDService()
         self._device_info = DeviceInfoService(software_revision="1.0", manufacturer="Murakami")
         self._battery = BatteryService()
@@ -148,16 +156,11 @@ class MusicPedal:
         return pressed
 
     def _read_battery_voltage(self):
-        # Onboard divider (~1/3) is only enabled while READ_BATT_ENABLE is driven
-        # low, to avoid its ~2.3uA leakage current the rest of the time.
-        enable = digitalio.DigitalInOut(board.READ_BATT_ENABLE)
-        enable.direction = digitalio.Direction.OUTPUT
-        enable.value = False
+        # Onboard divider (~1/3); READ_BATT_ENABLE is kept LOW permanently (see
+        # self._batt_enable in __init__), so no enable/disable toggling happens here.
         vbat = analogio.AnalogIn(board.VBATT)
         adc_v = (vbat.value / 65535) * vbat.reference_voltage
         vbat.deinit()
-        enable.value = True
-        enable.deinit()
         return adc_v * 3
 
     def _voltage_to_percent(self, voltage):
