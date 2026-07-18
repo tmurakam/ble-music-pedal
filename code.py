@@ -21,23 +21,25 @@ except ImportError:
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 PEDAL_PIN = board.D0
-# Pedal contact type — describes the wiring, GND-referenced in both cases:
-#   False = NO (Normally Open,  closes on press) — pin goes LOW  when pressed
-#   True  = NC (Normally Closed, opens on press) — pin goes HIGH when pressed
-# NOTE: this is only a complete NO/NC switch for _pedal_currently_pressed(), which
-# always forces an internal pull-up itself and just compares against this value. The
-# keypad.Keys() pull (via KEYPAD_VALUE_WHEN_PRESSED below) and the PinAlarm pull in
-# _enter_sleep() are both currently hardcoded for the NC case and would need to be
-# reworked to also support flipping this to False.
+
+# Pedal contact type — describes the wiring. All our pedals are simple mechanical
+# switches (no built-in bias), wired GND-referenced in both cases, so whichever
+# state isn't grounded always floats and needs a pull-up:
+#   False = NO (Normally Open,  closes on press) — floats HIGH at rest, LOW  when pressed
+#   True  = NC (Normally Closed, opens on press) — LOW at rest, floats HIGH when pressed
+# Flipping this alone is sufficient to swap pedal types: _pedal_currently_pressed()
+# always forces its own pull-up and just compares against this value, and
+# KEYPAD_VALUE_WHEN_PRESSED/_pedal_released() below are written generically in terms
+# of this flag rather than hardcoded for one polarity.
 PEDAL_PRESSED = True
+
 # keypad.Keys ties its internal pull direction to value_when_pressed (pull-up is only
-# available when value_when_pressed=False). Our pedal is NC wired to GND: it drives
-# LOW at rest and floats when pressed, so it needs a pull-up while pressed. This is
-# NOT a generic "not PEDAL_PRESSED" formula — a GND-referenced NO pedal also needs a
-# pull-up (it floats at rest instead), so this would need to become unconditionally
-# False, with the NO/NC distinction moved into _pedal_released() instead, before
-# PEDAL_PRESSED = False would work here again.
-KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED
+# available when value_when_pressed=False). Since every pedal here is GND-referenced
+# and needs a pull-up regardless of NO/NC (see PEDAL_PRESSED above), this is always
+# False — NOT "not PEDAL_PRESSED" — with the NO/NC distinction handled separately in
+# _pedal_released() below.
+KEYPAD_VALUE_WHEN_PRESSED = False
+
 DEBOUNCE_S = 0.05        # 50 ms: suppress contact bounce (handled by keypad.Keys)
 KEYPAD_SCAN_INTERVAL_S = DEBOUNCE_S / 2  # keypad background scan interval
 KEYPAD_DEBOUNCE_THRESHOLD = 2            # confirm after 2 matching scans (= DEBOUNCE_S)
@@ -51,6 +53,7 @@ SLEEP_POLL_INTERVAL_S = 0.5  # how often to wake briefly and poll the pedal whil
 HID_DWELL_S = 0.02       # 20 ms key-down time for reliable BLE HID recognition
 WAKE_RELEASE_TIMEOUT_S = 5.0  # max wait for pedal release after sleep wake
 BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update battery level
+
 # Unpair gesture: the device has no display/buttons to expose a bonding-management UI,
 # so a rapid-tap gesture on the pedal itself triggers it instead. A long-press gesture
 # was considered and rejected — a held pedal is normal operation (e.g. resting a foot on
@@ -59,6 +62,7 @@ BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update battery lev
 # bond is exactly the situation this needs to work in.
 UNPAIR_TAP_COUNT = 10     # number of rapid pedal releases required to trigger unpair
 UNPAIR_WINDOW_S = 5.0     # time window within which the taps must occur
+
 # Single-cell LiPo open-circuit voltage -> charge percent, approximated as a piecewise-
 # linear curve (the discharge curve is far from linear, especially in the 3.7-3.9V
 # midrange). Points below are commonly used rule-of-thumb values, not this cell's
@@ -77,6 +81,7 @@ BATTERY_CURVE = (
     (4.10, 95),
     (4.20, 100),
 )
+
 LED_PIN = board.LED_BLUE       # onboard RGB LED, active low
 LED_BLINK_PERIOD_PAIRING_S = 0.5    # advertising/pairing: 2 blinks per second
 LED_BLINK_PERIOD_CONNECTED_S = 3.0  # connected: 1 blink per 3 seconds
@@ -143,9 +148,9 @@ class MusicPedal:
     def _make_pedal(self):
         # keypad.Keys debounces and edge-detects in the background (C implementation),
         # emitting press/release events instead of requiring manual polling + debounce.
-        # See KEYPAD_VALUE_WHEN_PRESSED above for why this isn't PEDAL_PRESSED, and
-        # _pedal_released() below for how the resulting inverted event names are
-        # translated back to physical meaning.
+        # See KEYPAD_VALUE_WHEN_PRESSED above for why this is always pull-up, and
+        # _pedal_released() below for how its raw-level event names are translated
+        # back to physical meaning depending on NO/NC wiring.
         return keypad.Keys(
             (PEDAL_PIN,),
             value_when_pressed=KEYPAD_VALUE_WHEN_PRESSED,
@@ -156,9 +161,13 @@ class MusicPedal:
         )
 
     def _pedal_released(self, event):
-        # keypad runs with inverted polarity (see _make_pedal above), so its own
-        # event.pressed corresponds to the physical release edge.
-        return event.pressed
+        # keypad always runs with value_when_pressed=False (forced pull-up, see
+        # KEYPAD_VALUE_WHEN_PRESSED above), so its own pressed/released labels track
+        # the raw LOW/HIGH level rather than physical press/release. Which raw level
+        # is the physical release edge depends on wiring:
+        #   NC (PEDAL_PRESSED=True):  rest=LOW, press=floats HIGH -> release = LOW  = keypad "pressed"
+        #   NO (PEDAL_PRESSED=False): rest=floats HIGH, press=LOW -> release = HIGH = keypad "released"
+        return event.pressed if PEDAL_PRESSED else event.released
 
     def _pedal_currently_pressed(self):
         p = digitalio.DigitalInOut(PEDAL_PIN)
