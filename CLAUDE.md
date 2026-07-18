@@ -38,6 +38,7 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
 | NC pedal needs a pull-up while pressed, but `keypad.Keys(pull=True)` only selects a pull-up when `value_when_pressed=False` | `code.py` passes `KEYPAD_VALUE_WHEN_PRESSED = not PEDAL_PRESSED` to `keypad.Keys` instead of `PEDAL_PRESSED` directly, then reads `_pedal_released()` (which checks `event.pressed`, not `event.released`) to translate keypad's resulting inverted event names back to physical meaning — see caveat below |
 | Auto-reconnect (bonding) | Handled by `adafruit_ble` BLE stack automatically |
 | **LED blink: pairing vs connected** | Onboard blue LED (`board.LED_BLUE`, active low) flashes on for `LED_BLINK_ON_S`; every `LED_BLINK_PERIOD_PAIRING_S` (0.5s, 2×/s) while advertising and not connected, every `LED_BLINK_PERIOD_CONNECTED_S` (3s) while connected; off when asleep |
+| **Battery level reported to host** | Standard BLE Battery Service (`0x180F`); every `BATTERY_LOG_INTERVAL_S` (5s) `_log_battery()` samples `VBATT`, converts volts→percent via the piecewise-linear `BATTERY_CURVE` (a rule-of-thumb LiPo approximation, not this cell's datasheet), and writes it to `BatteryService.level`. Not included in the advertisement payload — iOS discovers it via GATT once connected. Charging status is *not* reported (see caveat below) |
 
 ## Architecture
 
@@ -51,6 +52,16 @@ Serial REPL: `screen /dev/tty.usbmodem* 115200`
    - Maintain BLE advertising whenever disconnected
 
 `enter_sleep()` must `deinit()` the `keypad.Keys` object before handing the pin to `alarm.pin.PinAlarm`. The object is recreated after wake. If the `alarm` module is unavailable (unsupported CircuitPython build), the code falls back to a busy-wait loop that reads the raw pin via a temporary `DigitalInOut` (`_pedal_currently_pressed()`), which is also used to wait out a stuck/held pedal after waking.
+
+### Caveat: `READ_BATT_ENABLE` must stay LOW, never HIGH
+
+Seeed's own docs warn that driving `board.READ_BATT_ENABLE` (P0.14) HIGH disables the
+divider's read path and can expose `board.VBATT` (P0.31, 3.6V max input) to voltages
+above its limit — risking pin damage — especially while charging. An earlier version of
+this code drove it HIGH between reads to save its ~2.3uA divider leakage; `code.py` now
+sets it up once in `__init__` (`self._batt_enable`) and never touches it again, accepting
+the small constant leakage (negligible next to the rest of the system's draw) in exchange
+for never hitting the unsafe state.
 
 ## Adjustable Constants
 
@@ -68,6 +79,8 @@ LED_PIN = board.LED_BLUE # onboard RGB LED used for advertising indicator
 LED_BLINK_PERIOD_PAIRING_S = 0.5    # blink cycle while advertising/pairing (2x/s)
 LED_BLINK_PERIOD_CONNECTED_S = 3.0  # blink cycle while connected (1x/3s)
 LED_BLINK_ON_S = 0.1        # on-time within each blink cycle
+BATTERY_LOG_INTERVAL_S = 5.0  # how often to sample voltage + update BLE battery level
+BATTERY_CURVE = (...)         # piecewise-linear LiPo voltage(V) -> percent lookup table
 ```
 
 ### Caveat: `PEDAL_PRESSED` is not a clean NO/NC toggle
